@@ -1,0 +1,1162 @@
+# 导入库
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# 读取数据
+df = pd.read_csv("/content/CHEMBL2903_.csv")
+
+# 创建画布
+plt.figure(figsize=(6, 6), dpi=300)
+
+# 绘制直方图（修改颜色部分）
+ax = sns.histplot(
+    data=df,
+    x='PIC50',
+    bins=30,
+    kde=True,            # 保持KDE显示
+    color='#DA5819',     # RGB(75,116,178)的十六进制
+    edgecolor='white',
+    linewidth=0.5,
+    # 移除了会导致错误的kde_kws参数
+)
+
+# 手动设置KDE曲线样式
+for line in ax.lines:    # 遍历所有图形元素
+    line.set_color('black')      # KDE曲线设为黑色
+    line.set_linewidth(1.5)      # 线宽加粗
+
+# 设置坐标轴样式
+plt.title('Distribution of PIC50', fontsize=14, pad=20)
+plt.xlabel('PIC50', fontsize=12)
+plt.ylabel('Frequency', fontsize=12)
+plt.grid(False)
+
+# 添加数值标签
+for p in ax.patches:
+    height = p.get_height()
+    if height > 0:
+        ax.annotate(
+            f'{int(height)}',
+            (p.get_x() + p.get_width() / 2., height),
+            ha='center',
+            va='bottom',
+            fontsize=8,
+            color='black'
+        )
+
+# 优化布局
+plt.tight_layout()
+plt.show()
+
+# 显示数据统计信息
+print("\n数据统计摘要:")
+print(df['PIC50'].describe())
+# 安装必要库
+!pip install lazypredict
+!pip install rdkit -q
+
+import pandas as pd
+import numpy as np
+from rdkit import Chem
+from rdkit.Chem import Descriptors
+from sklearn.model_selection import train_test_split
+from sklearn.feature_selection import VarianceThreshold
+from lazypredict.Supervised import LazyRegressor
+import matplotlib.pyplot as plt
+import seaborn as sns
+from rdkit.Chem import GraphDescriptors
+
+# 自定义函数：计算分子描述符
+from rdkit.Chem import AllChem   # 新增
+
+def calculate_descriptors(smiles):
+    """
+    用 ECFP6（半径=3，4096bit）代替传统描述符
+    返回 4096 列的 dict，列名 F0,F1,…,F1023
+    """
+    if not isinstance(smiles, str) or not smiles.strip():
+        return {f'F{i}': None for i in range(4096)}
+
+    mol = Chem.MolFromSmiles(smiles.strip())
+    if mol is None:
+        return {f'F{i}': None for i in range(4096)}
+
+    # 1. 生成二进制指纹
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=3, nBits=4096)
+    # 2. 转成 0/1 列表
+    arr = np.asarray(fp, dtype=np.uint8)   # shape (1024,)
+    # 3. 转成 dict → 后续 pd.Series 自动对齐
+    return {f'F{i}': int(arr[i]) for i in range(4096)}
+# =========================================================
+# ==================================================
+# 1. 数据加载与预处理
+print("正在加载数据...")
+df = pd.read_csv("/content/CHEMBL2903_.csv")
+
+# 2. 计算分子描述符
+print("正在计算分子描述符...")
+descriptors = df['Smiles'].apply(calculate_descriptors)
+df = pd.concat([df, descriptors.apply(pd.Series)], axis=1)
+
+# 3. 数据清洗
+print("\n数据清洗：")
+# 删除无效的SMILES
+initial_count = len(df)
+df = df.dropna(subset=descriptors.apply(pd.Series).columns)
+print(f"删除无效SMILES记录：{initial_count - len(df)}条")
+
+# 处理其他缺失值（用均值填充）
+numeric_cols = df.select_dtypes(include=np.number).columns
+df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].mean())
+
+# 4. 准备特征矩阵和标签
+X = df.drop(['Smiles', 'PIC50'], axis=1)
+y = df['PIC50']
+
+# 检查特征矩阵数据类型
+if not all([np.issubdtype(dtype, np.number) for dtype in X.dtypes]):
+    raise ValueError("特征矩阵包含非数值型列")
+
+# 5. 特征选择
+print("\n特征选择：")
+threshold = 0.8 * (1 - 0.8)
+selection = VarianceThreshold(threshold=threshold)
+X_selected = selection.fit_transform(X)
+selected_features = X.columns[selection.get_support(indices=True)]
+X = pd.DataFrame(X_selected, columns=selected_features)
+print(f"保留特征数量：{X.shape[1]}")
+
+# 6. 拆分数据集
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+print(f"\n训练集大小：{X_train.shape[0]} 样本")
+print(f"测试集大小：{X_test.shape[0]} 样本")
+
+# 7. 初始化并运行LazyRegressor
+print("\n正在训练和评估模型...")
+reg = LazyRegressor(verbose=0, ignore_warnings=True, custom_metric=None)
+models, predictions = reg.fit(X_train, X_test, y_train, y_test)
+
+# 8. 结果展示
+print("\n回归模型性能对比（测试集）：")
+display(models[['RMSE', 'R-Squared', 'Time Taken']])
+
+# 9. 可视化结果（仅展示前40模型）
+plt.figure(figsize=(12, 6),dpi=1200, facecolor='white')
+
+# 设置全局样式
+sns.set_style("white")
+
+# 筛选前30模型数据
+top_rmse = models.sort_values('RMSE').head(30)        # RMSE升序排列取最小前30
+top_r2 = models.sort_values('R-Squared', ascending=False).head(30)  # R²降序排列取最大前30
+top_time = models.sort_values('Time Taken').head(30)  # 时间升序排列取最快前30
+
+# ── 1. RMSE 图（单独） ─────────────────────────────────────────
+plt.figure(figsize=(6, 6),dpi=300)
+palette = sns.color_palette('Blues_r', n_colors=30)
+colors = [palette[i] for i in range(len(top_rmse))]
+sns.barplot(y=top_rmse.index, x='RMSE', data=top_rmse,
+            palette=colors, edgecolor='black')
+plt.title('Top 30 Models by RMSE', fontsize=14)
+plt.xlabel('RMSE', fontsize=12)
+plt.ylabel('Model', fontsize=12)
+plt.gca().set_facecolor('white')
+plt.grid(False)
+plt.tight_layout()
+plt.show()
+
+# ── 2. R² 图（单独） ─────────────────────────────────────────
+plt.figure(figsize=(6, 6),dpi=300)
+palette = sns.color_palette('Greens_r', n_colors=30)
+colors = [palette[i] for i in range(len(top_r2))]
+sns.barplot(y=top_r2.index, x='R-Squared', data=top_r2,
+            palette=colors, edgecolor='black')
+plt.title('Top 30 Models by R-Squared', fontsize=14)
+plt.xlabel('R-Squared', fontsize=12)
+plt.ylabel('Model', fontsize=12)
+plt.gca().set_facecolor('white')
+plt.grid(False)
+plt.tight_layout()
+plt.show()
+
+
+
+# 调整布局并显示
+plt.tight_layout()
+sns.despine()
+plt.show()
+# 9. 可视化结果（仅展示前40模型）
+plt.figure(figsize=(24, 12),dpi=1200, facecolor='white')
+
+# 设置全局样式
+sns.set_style("white")
+
+# 筛选前30模型数据
+top_rmse = models.sort_values('RMSE').head(30)        # RMSE升序排列取最小前30
+top_r2 = models.sort_values('R-Squared', ascending=False).head(30)  # R²降序排列取最大前30
+top_time = models.sort_values('Time Taken').head(30)  # 时间升序排列取最快前30
+
+# RMSE对比
+plt.subplot(1, 2, 1)
+sns.barplot(y=top_rmse.index, x='RMSE', data=top_rmse,
+            color='#90BEE0', edgecolor='black')
+plt.title('Top 30 Models by RMSE', fontsize=14)
+plt.xlabel('RMSE', fontsize=12)
+plt.ylabel('Model', fontsize=12)
+plt.gca().set_facecolor('white')
+plt.grid(False)
+
+# R²对比
+plt.subplot(1, 2, 2)
+sns.barplot(y=top_r2.index, x='R-Squared',
+            data=top_r2,
+            color='#90BEE0', edgecolor='black')
+plt.title('Top 30 Models by R-Squared', fontsize=14)
+plt.xlabel('R-Squared', fontsize=12)
+plt.xlim(0, 1)
+plt.gca().set_facecolor('white')
+plt.grid(False)
+
+# 训练时间对比
+plt.subplot(1, 3, 3)
+sns.barplot(y=top_time.index, x='Time Taken',
+            data=top_time,
+            color='#90BEE0', edgecolor='black')
+plt.title('Top 30 Models by Training Time', fontsize=14)
+plt.xlabel('Time Taken (seconds)', fontsize=12)
+plt.gca().set_facecolor('white')
+plt.grid(False)
+
+# 调整布局并显示
+plt.tight_layout()
+sns.despine()
+plt.show()
+# 安装必要库（如果尚未安装LightGBM）
+!pip install lightgbm
+!pip install rdkit -q
+
+import pandas as pd
+import numpy as np
+import joblib  # 新增导入
+from rdkit import Chem
+from rdkit.Chem import Descriptors
+from sklearn.model_selection import train_test_split
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.metrics import mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+from lightgbm import LGBMRegressor
+from scipy.stats import linregress
+from rdkit.Chem import AllChem
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error
+
+# ---------- 1. 计算 ECFP6 4096bit ----------
+def calculate_descriptors(smiles):
+    """ECFP6, 4096bit"""
+    if not isinstance(smiles, str) or not smiles.strip():
+        return {f'F{i}': None for i in range(4096)}
+    mol = Chem.MolFromSmiles(smiles.strip())
+    if mol is None:
+        return {f'F{i}': None for i in range(4096)}
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=3, nBits=4096)
+    arr = np.asarray(fp, dtype=np.uint8)
+    return {f'F{i}': int(arr[i]) for i in range(4096)}
+
+
+
+# 1. 数据加载与预处理
+print("正在加载数据...")
+df = pd.read_csv("/content/CHEMBL2903_.csv")
+
+# 2. 计算分子描述符
+print("正在计算分子描述符...")
+descriptors = df['Smiles'].apply(calculate_descriptors)
+df = pd.concat([df, descriptors.apply(pd.Series)], axis=1)
+
+# 3. 数据清洗
+print("\n数据清洗：")
+initial_count = len(df)
+df = df.dropna(subset=descriptors.apply(pd.Series).columns)
+print(f"删除无效SMILES记录：{initial_count - len(df)}条")
+
+# 处理其他缺失值
+numeric_cols = df.select_dtypes(include=np.number).columns
+df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].mean())
+
+# 4. 准备特征矩阵和标签
+X = df.drop(['Smiles', 'PIC50'], axis=1)
+y = df['PIC50']
+
+# 检查特征矩阵数据类型
+if not all([np.issubdtype(dtype, np.number) for dtype in X.dtypes]):
+    raise ValueError("特征矩阵包含非数值型列")
+
+# 5. 特征选择
+print("\n特征选择：")
+threshold = 0.8 * (1 - 0.8)
+selection = VarianceThreshold(threshold=threshold)
+X_selected = selection.fit_transform(X)
+selected_features = X.columns[selection.get_support(indices=True)]
+X = pd.DataFrame(X_selected, columns=selected_features)
+print(f"保留特征数量：{X.shape[1]}")
+
+# 6. 拆分数据集
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+print(f"\n训练集大小：{X_train.shape[0]} 样本")
+print(f"测试集大小：{X_test.shape[0]} 样本")
+
+# 7. 训练随机森林模型（修改部分）
+print("\n训练 RandomForest 回归模型...")
+model = RandomForestRegressor(
+    n_estimators=1000,   # 与原来 LGBM 保持一致
+    random_state=42,
+    n_jobs=-1
+)
+# 随机森林不需要 eval_set，直接 fit
+model.fit(X_train, y_train)
+
+# l新增：绘制训练损失曲线
+pt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+sns.set_style("whitegrid")
+
+LOSS_COLOR = (217/255, 65/255, 43/255)  # 指定RGB颜色
+
+
+
+
+
+# 保存模型和预处理信息
+print("\n保存模型和预处理信息...")
+joblib.dump(model, 'lgbm_model.pkl')
+
+# ✅ 只保留真正会用到的字段
+preprocessing_info = {
+    'variance_selector': selection,
+    'selected_features': selected_features.tolist()
+}
+joblib.dump(preprocessing_info, 'preprocessing_info.pkl')
+
+# 8. 模型评估
+y_pred = model.predict(X_test)
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+r2 = r2_score(y_test, y_pred)
+
+print(f"\n模型性能评估：")
+print(f"RMSE: {rmse:.4f}")
+print(f"R²: {r2:.4f}")
+
+# 9. 可视化预测结果（修改部分）
+min_val = min(y_test.min(), y_pred.min())  # 添加缺失变量定义
+max_val = max(y_test.max(), y_pred.max())  # 添加缺失变量定义
+
+plt.figure(figsize=(8, 6), dpi=100, facecolor='white')  # 修改dpi为600
+sns.set_style("whitegrid")
+
+# 颜色配置
+DATA_COLOR = (75/255, 116/255, 178/255)
+REGRESSION_COLOR = (219/255, 49/255, 36/255)
+PERFECT_COLOR = (144/255, 190/255, 224/255)
+
+# 计算回归线参数
+slope, intercept, r_value, _, _ = linregress(y_test, y_pred)
+reg_line = slope * y_test + intercept
+
+# 绘制散点图
+ax = sns.scatterplot(
+    x=y_test,
+    y=y_pred,
+    color=DATA_COLOR,
+    alpha=0.9,
+    edgecolor='w',
+    linewidth=0.3,
+    label='Predictions'
+)
+
+# 添加参考线
+plt.plot(y_test, reg_line, color=PERFECT_COLOR, lw=2.0, label='Regression line')
+plt.plot([min_val, max_val], [min_val, max_val], '--',
+         color=REGRESSION_COLOR, lw=2.0, label='Perfect fit')
+
+# 图形美化
+plt.title('Prediction Performance Visualization', fontsize=14, pad=20)
+plt.xlabel('True PIC50 Values', fontsize=12)
+plt.ylabel('Predicted PIC50 Values', fontsize=12)
+plt.grid(True, linestyle=':', alpha=0.9)
+
+# 指标标注
+text_str = f'RMSE = {rmse:.3f}\nR² = {r2:.3f}\nSlope = {slope:.3f}'
+plt.text(
+    x=0.05, y=0.95,
+    s=text_str,
+    transform=ax.transAxes,
+    verticalalignment='top',
+    fontsize=10,
+    bbox=dict(
+        facecolor='#f8f8f8',
+        alpha=0.9,
+        edgecolor='#d0d0d0',
+        boxstyle='round,pad=0.3'
+    )
+)
+
+# 坐标轴调整
+buffer_range = (max_val - min_val) * 0.07
+ax.set_xlim(min_val - buffer_range, max_val + buffer_range)
+ax.set_ylim(min_val - buffer_range, max_val + buffer_range)
+
+# 设置刻度格式
+ax.xaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))
+ax.yaxis.set_major_formatter(plt.FormatStrFormatter('%.1f'))
+
+plt.tight_layout()
+plt.show()
+# @title
+!pip install rdkit-pypi -qqq
+!pip install lightgbm
+!pip install optuna
+!pip install seaborn  # Ensure seaborn is installed
+
+import pandas as pd
+import numpy as np
+import joblib
+from rdkit import Chem
+from rdkit.Chem import Descriptors
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.metrics import mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+from lightgbm import LGBMRegressor
+from scipy.stats import linregress
+import optuna
+import warnings
+warnings.filterwarnings('ignore')
+
+# 定义颜色方案
+colors = {
+    'red': (219/255, 49/255, 36/255),
+    'orange': (252/255, 140/255, 90/255),
+    'yellow': (255/255, 223/255, 146/255),
+    'light_blue': (230/255, 241/255, 243/255),
+    'blue': (144/255, 190/255, 224/255),
+    'dark_blue': (75/255, 116/255, 178/255)
+}
+
+# 设置全局绘图样式
+sns.set_style("whitegrid")
+sns.set_palette([colors['blue'], colors['dark_blue'], colors['light_blue'],
+                colors['orange'], colors['yellow'], colors['red']])
+plt.rcParams['axes.facecolor'] = 'white'
+plt.rcParams['figure.facecolor'] = 'white'
+plt.rcParams['grid.color'] = '#DDDDDD'
+plt.rcParams['grid.alpha'] = 0.5
+
+# 自定义函数：计算分子描述符
+# ---------- 1. 计算 ECFP6 4096bit ----------
+def calculate_descriptors(smiles):
+    """ECFP6, 4096bit"""
+    if not isinstance(smiles, str) or not smiles.strip():
+        return {f'F{i}': None for i in range(4096)}
+    mol = Chem.MolFromSmiles(smiles.strip())
+    if mol is None:
+        return {f'F{i}': None for i in range(4096)}
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=3, nBits=4096)
+    arr = np.asarray(fp, dtype=np.uint8)
+    return {f'F{i}': int(arr[i]) for i in range(4096)}
+
+
+
+# 1. 数据加载与预处理
+print("正在加载数据...")
+df = pd.read_csv("/content/CHEMBL2903_.csv")
+
+# 2. 计算分子描述符
+print("正在计算分子描述符...")
+descriptors = df['Smiles'].apply(calculate_descriptors)
+df = pd.concat([df, descriptors.apply(pd.Series)], axis=1)
+
+# 3. 数据清洗
+print("\n数据清洗：")
+initial_count = len(df)
+df = df.dropna(subset=descriptors.apply(pd.Series).columns)
+print(f"删除无效SMILES记录：{initial_count - len(df)}条")
+
+# 处理其他缺失值
+numeric_cols = df.select_dtypes(include=np.number).columns
+df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].mean())
+
+# 4. 准备特征矩阵和标签
+X = df.drop(['Smiles', 'PIC50'], axis=1)
+y = df['PIC50']
+
+# 检查特征矩阵数据类型
+if not all([np.issubdtype(dtype, np.number) for dtype in X.dtypes]):
+    raise ValueError("特征矩阵包含非数值型列")
+
+# 5. 特征选择
+print("\n特征选择：")
+threshold = 0.8 * (1 - 0.8)
+selection = VarianceThreshold(threshold=threshold)
+X_selected = selection.fit_transform(X)
+selected_features = X.columns[selection.get_support(indices=True)]
+X = pd.DataFrame(X_selected, columns=selected_features)
+print(f"保留特征数量：{X.shape[1]}")
+
+# 6. 拆分数据集
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+print(f"\n训练集大小：{X_train.shape[0]} 样本")
+print(f"测试集大小：{X_test.shape[0]} 样本")
+
+# 7. 定义Optuna目标函数（改为RandomForest参数）
+def objective(trial):
+    params = {
+        'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+        'max_depth': trial.suggest_int('max_depth', 5, 50),
+        'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+        'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
+        'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', 0.3, 0.5, 0.7, None]),
+        'bootstrap': trial.suggest_categorical('bootstrap', [True, False]),
+        'random_state': 42,
+        'n_jobs': -1
+    }
+
+    model = RandomForestRegressor(**params)  # 改为RandomForest
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    score = cross_val_score(model, X_train, y_train, cv=kf,
+                          scoring='neg_mean_squared_error', n_jobs=-1).mean()
+    return score
+
+# 8. 运行Optuna优化
+print("\n开始超参数优化...")
+study = optuna.create_study(direction='maximize')
+study.optimize(objective, n_trials=50, show_progress_bar=True)
+
+print("\n最佳参数:")
+print(study.best_params)
+print(f"最佳分数 (负MSE): {study.best_value:.4f}")
+
+# 9. 提取试验结果并预处理
+trials_df = study.trials_dataframe()
+trials_df['RMSE'] = np.sqrt(-trials_df['value'])
+trials_df = trials_df.rename(columns=lambda x: x.replace('params_', ''))
+
+# 保存优化结果
+trials_df.to_csv('optuna_optimization_results.csv', index=False)
+print("\n优化结果已保存为 optuna_optimization_results.csv")
+
+# 10. 绘制单参数与RMSE关系图（改为RF参数）
+plt.figure(figsize=(6, 6),dpi=300)
+params_to_plot = ['n_estimators', 'max_depth', 'min_samples_split', 'min_samples_leaf']
+
+for i, param in enumerate(params_to_plot, 1):
+    ax = plt.subplot(2, 2, i)
+
+    sc = ax.scatter(trials_df[param], trials_df['RMSE'],
+                   color=colors['dark_blue'],
+                   alpha=0.7)
+
+    best_idx = trials_df['RMSE'].idxmin()
+    ax.scatter(trials_df.loc[best_idx, param], trials_df.loc[best_idx, 'RMSE'],
+              color=colors['red'], marker='*', s=200, label='Best')
+
+    ax.set_xlabel(param, fontsize=12)
+    ax.set_ylabel('RMSE', fontsize=12)
+    ax.set_title(f'{param} vs RMSE', fontsize=14)
+    ax.grid(True, linestyle=':', alpha=0.6)
+
+    if i == 1:
+        ax.legend()
+
+plt.tight_layout()
+plt.savefig('hyperparameter_rmse_relationship.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 11. 绘制参数重要性图（6×6，dpi=300）
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+param_importance = optuna.importance.get_param_importances(study)
+param_names = list(param_importance.keys())
+importance_values = list(param_importance.values())
+
+# 限制颜色数量，循环使用
+color_list = [colors['light_blue'], colors['blue'], colors['dark_blue'],
+              colors['orange'], colors['yellow'], colors['red']]
+
+# 为每个柱子分配颜色
+bar_colors = [color_list[i % len(color_list)] for i in range(len(param_names))]
+
+bars = plt.barh(param_names, importance_values, color=bar_colors,
+                edgecolor='black', linewidth=1.2)
+plt.xlabel('Importance', fontsize=12)
+plt.ylabel('Parameters', fontsize=12)
+plt.title('Hyperparameter Importance', fontsize=14, pad=15)
+plt.grid(True, axis='x', linestyle=':', alpha=0.6)
+plt.gca().invert_yaxis()
+
+# 在柱子上标注数值
+for bar, val in zip(bars, importance_values):
+    plt.text(val + 0.01, bar.get_y() + bar.get_height()/2,
+             f'{val:.3f}', va='center', fontsize=9)
+
+plt.tight_layout()
+plt.savefig('hyperparameter_importance.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 12. 使用最佳参数训练最终模型
+print("\n使用最佳参数训练最终模型...")
+best_params = study.best_params
+final_model = RandomForestRegressor(**best_params)
+final_model.fit(X_train, y_train)
+
+# 13. 测试集评估
+y_pred = final_model.predict(X_test)
+rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+r2 = r2_score(y_test, y_pred)
+
+print(f"\n测试集性能评估：")
+print(f"RMSE: {rmse:.4f}")
+print(f"R²: {r2:.4f}")
+
+# 14. 绘制测试集预测结果（6×6，dpi=300）
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+sns.set_style("whitegrid")
+
+slope, intercept, r_value, _, _ = linregress(y_test, y_pred)
+reg_line = slope * y_test + intercept
+
+# 散点图
+plt.scatter(y_test, y_pred,
+            alpha=0.7,
+            color=colors['blue'],
+            edgecolor='black',
+            linewidth=0.3,
+            s=60,
+            label='Predictions')
+
+# 回归线
+plt.plot(y_test, reg_line,
+         color=colors['red'],
+         linewidth=2.5,
+         label=f'Regression')
+
+# 完美拟合线
+plt.plot([y_test.min(), y_test.max()],
+         [y_test.min(), y_test.max()],
+         '--',
+         color=colors['dark_blue'],
+         linewidth=2,
+         label='Perfect fit')
+
+plt.xlabel('True PIC50 Values', fontsize=12, labelpad=10)
+plt.ylabel('Predicted PIC50 Values', fontsize=12, labelpad=10)
+plt.title(f'Test Set Predictions',
+          fontsize=13, pad=15)
+plt.legend(fontsize=9, loc='lower right')
+
+# 指标文本框
+textstr = f'R² = {r2:.4f}\nRMSE = {rmse:.4f}'
+plt.text(0.05, 0.95,
+         textstr,
+         transform=plt.gca().transAxes,
+         fontsize=10,
+         verticalalignment='top',
+         bbox=dict(facecolor='white', alpha=0.9, edgecolor='gray', boxstyle='round,pad=0.5'))
+
+plt.grid(True, linestyle=':', alpha=0.7)
+plt.tight_layout()
+plt.savefig('test_set_predictions.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 15. 绘制特征重要性图（6×6，dpi=300）
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+feature_importance = pd.DataFrame({
+    'feature': X.columns,
+    'importance': final_model.feature_importances_
+}).sort_values('importance', ascending=True).tail(15)  # Top 15
+
+# 渐变色
+n_features = len(feature_importance)
+bar_colors = plt.cm.Blues(np.linspace(0.4, 0.9, n_features))
+
+bars = plt.barh(feature_importance['feature'],
+                feature_importance['importance'],
+                color=bar_colors,
+                edgecolor='black',
+                linewidth=1.2)
+
+plt.xlabel('Importance', fontsize=12)
+plt.ylabel('Features', fontsize=12)
+plt.title('Random Forest Feature Importance (Top 15)', fontsize=13, pad=15)
+plt.grid(True, axis='x', linestyle=':', alpha=0.6)
+
+# 在柱子上标注数值
+for bar, val in zip(bars, feature_importance['importance']):
+    plt.text(val + 0.005, bar.get_y() + bar.get_height()/2,
+             f'{val:.3f}', va='center', fontsize=8)
+
+plt.tight_layout()
+plt.savefig('feature_importance.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 16. 保存模型和结果
+print("\n保存模型和结果...")
+joblib.dump(final_model, 'optimized_rf_model.pkl')
+
+preprocessing_info = {
+    'feature_columns': X.columns.tolist(),
+    'variance_selector': selection,
+    'numeric_means': df[numeric_cols].mean().to_dict()
+}
+joblib.dump(preprocessing_info, 'preprocessing_info.pkl')
+
+# 保存性能摘要
+summary_data = {
+    'Best_RMSE': [np.sqrt(-study.best_value)],
+    'Best_R2': [r2],
+    'Best_Params': [str(study.best_params)],
+    'Test_RMSE': [rmse],
+    'Test_R2': [r2]
+}
+pd.DataFrame(summary_data).to_csv('model_performance_summary.csv', index=False)
+print("模型性能摘要已保存为 model_performance_summary.csv")
+
+!pip install rdkit-pypi -qqq
+!pip install lightgbm
+!pip install rdkit -q
+
+import pandas as pd
+import numpy as np
+import joblib
+from rdkit import Chem
+from rdkit.Chem import Descriptors
+from sklearn.model_selection import train_test_split, KFold
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import matplotlib.pyplot as plt
+import seaborn as sns
+from lightgbm import LGBMRegressor, early_stopping
+from scipy.stats import linregress
+from rdkit.Chem import AllChem
+import warnings
+warnings.filterwarnings('ignore')
+
+# ---------- 1. 计算 ECFP6 4096bit ----------
+def calculate_descriptors(smiles):
+    """ECFP6, 4096bit"""
+    if not isinstance(smiles, str) or not smiles.strip():
+        return {f'F{i}': None for i in range(4096)}
+    mol = Chem.MolFromSmiles(smiles.strip())
+    if mol is None:
+        return {f'F{i}': None for i in range(4096)}
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=3, nBits=4096)
+    arr = np.asarray(fp, dtype=np.uint8)
+    return {f'F{i}': int(arr[i]) for i in range(4096)}
+
+
+
+# 1. 数据加载与预处理
+print("正在加载数据...")
+df = pd.read_csv("/content/CHEMBL2903_.csv")
+
+# 2. 计算分子描述符
+print("正在计算分子描述符...")
+descriptors = df['Smiles'].apply(calculate_descriptors)
+df = pd.concat([df, descriptors.apply(pd.Series)], axis=1)
+
+# 3. 数据清洗
+print("\n数据清洗：")
+initial_count = len(df)
+df = df.dropna(subset=descriptors.apply(pd.Series).columns)
+print(f"删除无效SMILES记录：{initial_count - len(df)}条")
+
+# 处理其他缺失值
+numeric_cols = df.select_dtypes(include=np.number).columns
+df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].mean())
+
+# 4. 准备特征矩阵和标签
+X = df.drop(['Smiles', 'PIC50'], axis=1)
+y = df['PIC50']
+
+# 检查特征矩阵数据类型
+if not all([np.issubdtype(dtype, np.number) for dtype in X.dtypes]):
+    raise ValueError("特征矩阵包含非数值型列")
+
+# 5. 特征选择
+print("\n特征选择：")
+threshold = 0.8 * (1 - 0.8)
+selection = VarianceThreshold(threshold=threshold)
+X_selected = selection.fit_transform(X)
+selected_features = X.columns[selection.get_support(indices=True)]
+X = pd.DataFrame(X_selected, columns=selected_features)
+print(f"保留特征数量：{X.shape[1]}")
+
+# 6. 拆分数据集
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42
+)
+print(f"\n训练集大小：{X_train.shape[0]} 样本")
+print(f"测试集大小：{X_test.shape[0]} 样本")
+
+# 7. K折交叉验证设置
+n_folds = 5
+kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+cv_results = {'train_mse': [], 'val_mse': [], 'val_r2': [], 'val_mae': []}
+fold_predictions = []
+
+# 8. 进行K折交叉验证
+print(f"\n进行{n_folds}折交叉验证...")
+for fold, (train_idx, val_idx) in enumerate(kf.split(X_train), 1):
+    print(f"\nFold {fold}/{n_folds}")
+    X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+    y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
+
+    # 改为随机森林（无 learning_rate 和 early_stopping）
+    model = RandomForestRegressor(
+        n_estimators=500,        # 树的数量（RF 没有 early_stopping，用适中值）
+        max_depth=20,            # 最大深度，防止过拟合
+        min_samples_split=5,     # 节点分裂最小样本数
+        min_samples_leaf=2,      # 叶子节点最小样本数
+        max_features='sqrt',     # 每次分裂考虑的特征数
+        random_state=42,
+        n_jobs=-1                # 使用所有CPU核心
+    )
+
+    # RF 直接 fit，无需 eval_set 和 early_stopping
+    model.fit(X_tr, y_tr)
+
+    # 记录结果
+    train_pred = model.predict(X_tr)
+    val_pred = model.predict(X_val)
+
+    cv_results['train_mse'].append(mean_squared_error(y_tr, train_pred))
+    cv_results['val_mse'].append(mean_squared_error(y_val, val_pred))
+    cv_results['val_r2'].append(r2_score(y_val, val_pred))
+    cv_results['val_mae'].append(mean_absolute_error(y_val, val_pred))
+
+    fold_predictions.append((y_val, val_pred))
+
+    print(f"  Train MSE: {cv_results['train_mse'][-1]:.4f}")
+    print(f"  Val MSE: {cv_results['val_mse'][-1]:.4f}")
+    print(f"  Val R²: {cv_results['val_r2'][-1]:.4f}")
+    print(f"  Val MAE: {cv_results['val_mae'][-1]:.4f}")
+
+# 定义颜色方案
+colors = {
+    'red': (219/255, 49/255, 36/255),
+    'orange': (252/255, 140/255, 90/255),
+    'yellow': (255/255, 223/255, 146/255),
+    'light_blue': (230/255, 241/255, 243/255),
+    'blue': (144/255, 190/255, 224/255),
+    'dark_blue': (75/255, 116/255, 178/255)
+}
+
+# 9. 绘制K折验证结果（拆分为4个独立图，每个6×6，dpi=300）
+
+# 图1: 各折MSE对比
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+plt.plot(range(1, n_folds+1), cv_results['train_mse'], 'o-',
+         color=colors['dark_blue'], label='Train MSE', linewidth=2, markersize=8)
+plt.plot(range(1, n_folds+1), cv_results['val_mse'], 'o-',
+         color=colors['red'], label='Val MSE', linewidth=2, markersize=8)
+plt.xlabel('Fold', fontsize=11)
+plt.ylabel('MSE', fontsize=11)
+plt.title('Training and Validation MSE per Fold', fontsize=12, pad=15)
+plt.legend(fontsize=10)
+plt.grid(True, linestyle=':', alpha=0.7)
+plt.tight_layout()
+plt.savefig('fig1_mse_per_fold.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 图2: 各折R²对比
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+bars = plt.bar(range(1, n_folds+1), cv_results['val_r2'],
+               color=colors['blue'], edgecolor='black', linewidth=1.2)
+plt.xlabel('Fold', fontsize=11)
+plt.ylabel('R² Score', fontsize=11)
+plt.title('Validation R² per Fold', fontsize=12, pad=15)
+plt.ylim(0, 1)
+plt.grid(True, linestyle=':', alpha=0.7, axis='y')
+# 在柱子上标注数值
+for bar, val in zip(bars, cv_results['val_r2']):
+    plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+             f'{val:.3f}', ha='center', va='bottom', fontsize=9)
+plt.tight_layout()
+plt.savefig('fig2_r2_per_fold.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 图3: 预测结果散点图
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+fold_colors = [colors['dark_blue'], colors['red'], colors['orange'],
+               colors['yellow'], colors['blue']]
+for i, (y_val, pred) in enumerate(fold_predictions, 1):
+    plt.scatter(y_val, pred, alpha=0.6, color=fold_colors[i-1],
+                label=f'Fold {i}', edgecolor='w', linewidth=0.3, s=50)
+min_val = min([min(y) for y, _ in fold_predictions])
+max_val = max([max(y) for y, _ in fold_predictions])
+plt.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, label='Perfect fit')
+plt.xlabel('True PIC50 Values', fontsize=11)
+plt.ylabel('Predicted PIC50 Values', fontsize=11)
+plt.title('Prediction Results by Fold', fontsize=12, pad=15)
+plt.legend(fontsize=9, loc='lower right')
+plt.grid(True, linestyle=':', alpha=0.7)
+plt.tight_layout()
+plt.savefig('fig3_prediction_scatter.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 图4: 误差分布
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+errors = np.concatenate([y - pred for y, pred in fold_predictions])
+sns.histplot(errors, kde=True, bins=20, color=colors['blue'], edgecolor='black')
+plt.axvline(x=0, color=colors['red'], linestyle='--', linewidth=2, label='Zero error')
+plt.xlabel('Prediction Error', fontsize=11)
+plt.ylabel('Frequency', fontsize=11)
+plt.title('Error Distribution Across Folds', fontsize=12, pad=15)
+plt.legend(fontsize=10)
+plt.grid(True, linestyle=':', alpha=0.7)
+plt.tight_layout()
+plt.savefig('fig4_error_distribution.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 10. 训练最终模型并评估测试集
+print("\n训练最终模型并评估测试集...")
+
+final_model = RandomForestRegressor(
+    n_estimators=500,
+    max_depth=20,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    max_features='sqrt',
+    random_state=42,
+    n_jobs=-1
+)
+
+final_model.fit(X_train, y_train)
+
+# 11. 测试集评估
+y_pred = final_model.predict(X_test)
+
+metrics = {
+    'MSE': mean_squared_error(y_test, y_pred),
+    'R²': r2_score(y_test, y_pred),
+    'MAE': mean_absolute_error(y_test, y_pred)
+}
+
+print("\n测试集性能指标:")
+print(f"MSE: {metrics['MSE']:.4f}")
+print(f"R²: {metrics['R²']:.4f}")
+print(f"MAE: {metrics['MAE']:.4f}")
+
+# 12. 绘制测试集结果（拆分为2个独立图，每个6×6，dpi=300）
+
+# 图5: 测试集预测结果散点图
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+plt.scatter(y_test, y_pred, alpha=0.7, color=colors['dark_blue'],
+            edgecolor='w', linewidth=0.3, s=60)
+min_val, max_val = min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())
+buffer = (max_val - min_val) * 0.05
+plt.plot([min_val, max_val], [min_val, max_val], 'k--', linewidth=2, label='Perfect fit')
+
+# 添加回归线
+slope, intercept, r_value, _, _ = linregress(y_test, y_pred)
+reg_line = slope * y_test + intercept
+plt.plot(y_test, reg_line, color=colors['red'], linewidth=2,
+         label=f'Regression (R²={metrics["R²"]:.3f})')
+
+plt.xlabel('True PIC50 Values', fontsize=11)
+plt.ylabel('Predicted PIC50 Values', fontsize=11)
+plt.title('Test Set Predictions', fontsize=12, pad=15)
+plt.legend(fontsize=10, loc='lower right')
+plt.grid(True, linestyle=':', alpha=0.7)
+
+# 添加指标文本框
+textstr = f'R² = {metrics["R²"]:.4f}\nRMSE = {np.sqrt(metrics["MSE"]):.4f}\nMAE = {metrics["MAE"]:.4f}'
+plt.text(0.05, 0.95, textstr, transform=plt.gca().transAxes,
+         fontsize=10, verticalalignment='top',
+         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+plt.xlim(min_val - buffer, max_val + buffer)
+plt.ylim(min_val - buffer, max_val + buffer)
+plt.tight_layout()
+plt.savefig('fig5_test_prediction.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 图6: 测试集误差分布
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+test_errors = y_test - y_pred
+sns.histplot(test_errors, kde=True, bins=20, color=colors['blue'],
+             edgecolor='black', linewidth=1.2)
+plt.axvline(x=0, color=colors['red'], linestyle='--', linewidth=2, label='Zero error')
+plt.axvline(x=test_errors.mean(), color='green', linestyle='--',
+            linewidth=2, label=f'Mean error ({test_errors.mean():.3f})')
+plt.xlabel('Prediction Error', fontsize=11)
+plt.ylabel('Frequency', fontsize=11)
+plt.title('Test Set Error Distribution', fontsize=12, pad=15)
+plt.legend(fontsize=10)
+plt.grid(True, linestyle=':', alpha=0.7)
+plt.tight_layout()
+plt.savefig('fig6_test_error_distribution.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# 13. 保存模型
+joblib.dump(final_model, 'rf_model.pkl')
+print("\n模型已保存为 'rf_model.pkl'")
+
+# 14. 输出特征重要性（RF 特有）
+feature_importance = pd.DataFrame({
+    'feature': X.columns,
+    'importance': final_model.feature_importances_
+}).sort_values('importance', ascending=False)
+
+print("\nTop 10 重要特征:")
+print(feature_importance.head(10))
+
+# 图7: 特征重要性（可选，也是6×6）
+plt.figure(figsize=(6, 6), dpi=300, facecolor='white')
+top_features = feature_importance.head(15)
+plt.barh(range(len(top_features)), top_features['importance'],
+         color=colors['dark_blue'], edgecolor='black', linewidth=1.2)
+plt.yticks(range(len(top_features)), top_features['feature'], fontsize=9)
+plt.xlabel('Importance', fontsize=11)
+plt.ylabel('Features', fontsize=11)
+plt.title('Top 15 Feature Importances', fontsize=12, pad=15)
+plt.gca().invert_yaxis()
+plt.grid(True, axis='x', linestyle=':', alpha=0.7)
+plt.tight_layout()
+plt.savefig('fig7_feature_importance.png', dpi=300, bbox_inches='tight')
+plt.show()
+#0. 一键安装依赖
+!pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 -q
+!pip install rdkit scikit-learn -q
+!pip install lightgbm -q
+
+# 1. 通用工具函数
+import pandas as pd, numpy as np, matplotlib.pyplot as plt, seaborn as sns, joblib, warnings, torch, torch.nn as nn, torch.optim as optim
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, ExtraTreesClassifier, VotingClassifier
+from sklearn.metrics import (roc_curve, auc, precision_recall_curve, f1_score,
+                             RocCurveDisplay, PrecisionRecallDisplay)
+from rdkit import Chem
+from rdkit.Chem import Descriptors
+from sklearn.ensemble import (RandomForestClassifier, BaggingClassifier,
+                              HistGradientBoostingClassifier)
+from lightgbm import LGBMClassifier
+warnings.filterwarnings("ignore")
+
+#2. 数据读取 + 描述符 + 二值化
+def calc_desc(smiles):
+    if not isinstance(smiles, str) or not smiles.strip():
+        return None
+    mol = Chem.MolFromSmiles(smiles.strip())
+    if mol is None: return None
+    return {n: f(mol) for n, f in Descriptors.descList}
+
+df = pd.read_csv('/content/CHEMBL2903_.csv')
+df = df[df['Smiles'].notna()]
+df['Smiles'] = df['Smiles'].astype(str).str.strip()
+df = df[df['Smiles'] != '']
+desc = df['Smiles'].apply(calc_desc)
+df = pd.concat([df, desc.apply(pd.Series)], axis=1).dropna(subset=desc.apply(pd.Series).columns)
+X = df.drop(['Smiles', 'PIC50'], axis=1)
+y = (df['PIC50'] >= 5.2).astype(int)          # 二值化
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+
+
+#4 个单独的分类器
+models = {
+    'RandomForest': RandomForestClassifier(n_estimators=1000, random_state=42, n_jobs=-1),
+    'Bagging':      BaggingClassifier(n_estimators=1000, random_state=42, n_jobs=-1),
+    'HistGB':       HistGradientBoostingClassifier(max_iter=1000, random_state=42),
+    'LGBM':         LGBMClassifier(n_estimators=1000, random_state=42, n_jobs=-1, verbose=-1)
+}
+
+# 统一训练
+for name, mdl in models.items():
+    mdl.fit(X_train, y_train)
+for name, mdl in models.items():
+    mdl.fit(X_train, y_train)
+
+
+
+# 5. 统一打分 & 画图
+# ── 1. ROC 曲线（单独） ──────────────────────────────────────
+plt.figure(figsize=(6, 6),dpi=300)
+plt.plot([0, 1], [0, 1], 'k--', alpha=.5)
+for nm, mdl in models.items():
+    sc = mdl.predict_proba(X_test)[:, 1]
+    fpr, tpr, _ = roc_curve(y_test, sc)
+    roc_auc = auc(fpr, tpr)
+    plt.plot(fpr, tpr, lw=2, label=f'{nm} (AUC={roc_auc:.3f})')
+
+plt.xlabel('FPR'); plt.ylabel('TPR')
+plt.title('ROC')
+plt.legend()
+plt.tight_layout()
+plt.show()
+# ── 2. PR 曲线（单独） ──────────────────────────────────────
+plt.figure(figsize=(6, 6),dpi=300)
+baseline = y_test.mean()
+plt.axhline(y=baseline, color='k', linestyle='--', alpha=.5)
+for nm, mdl in models.items():
+    sc = mdl.predict_proba(X_test)[:, 1]
+    prec, rec, _ = precision_recall_curve(y_test, sc)
+    pr_auc = auc(rec, prec)
+    f1 = f1_score(y_test, (sc >= 0.5).astype(int))
+    plt.plot(rec, prec, lw=2, label=f'{nm} (AP={pr_auc:.3f}, F1={f1:.3f})')
+
+plt.xlabel('Recall'); plt.ylabel('Precision')
+plt.title('PR curve')
+plt.legend(loc='lower left')
+plt.tight_layout()
+plt.show()
+!pip install rdkit joblib -q
+import numpy as np
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import AllChem
+import joblib
+
+# 1. 加载模型 & 预处理
+model = joblib.load('lgbm_model.pkl')
+prep  = joblib.load('preprocessing_info.pkl')
+
+# 2. SMILES → ECFP6 (4096-bit)
+def smiles_to_ecfp6(smiles, radius=3, nBits=4096):
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=nBits)
+    arr = np.zeros((1,), dtype=np.int8)
+    AllChem.DataStructs.ConvertToNumpyArray(fp, arr)
+    return arr
+
+# 3. 单条预测
+def predict_PIC50(smiles):
+    arr = smiles_to_ecfp6(smiles)
+    if arr is None:
+        return np.nan
+    arr_sel = prep['variance_selector'].transform(arr.reshape(1, -1))
+    return float(model.predict(arr_sel)[0])
+
+# 4. 批量读文件
+df = pd.read_csv('/content/天然酚类化合物库.csv')          # 自动识别列名（不区分大小写）
+smiles_col = next(c for c in df.columns if c.lower() == 'smiles')
+
+# ↓↓↓ 新增：清洗非字符串/空值 ↓↓↓
+df[smiles_col] = df[smiles_col].astype(str).str.strip().replace('nan', np.nan)
+df = df.dropna(subset=[smiles_col])          # 可选：直接丢掉空 SMILES
+
+print('正在预测 …')
+df['PIC50_pred'] = df[smiles_col].apply(predict_PIC50)
+
+# 5. 保存
+out_file = '/content/天然酚类化合物库_PIC50.csv'
+df.to_csv(out_file, index=False)
+print(f'完成！结果已写入 {out_file}')
+print("\n所有结果已保存完毕！")
